@@ -15,10 +15,13 @@ export async function onRequestGet({ env, params }) {
     status: order.status,
     paymentStatus: order.paymentStatus,
     total: order.total,
+    deliveryMethod: order.deliveryMethod,
+    deliveryZone: order.deliveryZone,
+    deliveryZoneLabel: order.deliveryZoneLabel,
+    deliveryFee: order.deliveryFee,
     address: order.address,
-    originState: order.originState,
-    destState: order.destState,
-    country: order.country,
+    landmark: order.landmark,
+    instructions: order.instructions,
     items: JSON.parse(order.items),
   });
 }

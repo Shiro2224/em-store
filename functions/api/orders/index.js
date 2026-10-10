@@ -1,4 +1,5 @@
 import { json, corsPreflight, isAdmin } from "../../_helpers/utils.js";
+import { getDeliveryZones } from "../delivery-zones/index.js";
 
 export async function onRequestOptions() {
   return corsPreflight();
@@ -24,15 +25,48 @@ export async function onRequestGet({ request, env }) {
 // This means an order existing in the database is not the same as an order
 // being paid for — the frontend must call POST /api/payments/initialize
 // right after this to actually send the customer to pay.
+//
+// DELIVERY FEE — SECURITY NOTE: the browser sends which delivery zone the
+// customer picked (a short key like "nearby"), never a naira amount. The
+// actual fee charged is always looked up here, server-side, from the
+// `settings` table (see functions/api/delivery-zones/index.js). A customer
+// editing values in their browser cannot change what they're charged.
 export async function onRequestPost({ request, env }) {
   const body = await request.json();
-  const { name, phone, address, country, originState, destState, items, deliveryFee } = body;
+  const { name, phone, deliveryMethod, deliveryZone, address, landmark, instructions, items } = body;
 
-  if (!name || !phone || !address || !items || !items.length) {
+  if (!name || !phone || !items || !items.length) {
     return json({ error: "Missing required order fields" }, 400);
   }
 
-  // Verify stock availability and compute the total server-side (never
+  const method = deliveryMethod === "pickup" ? "pickup" : "delivery";
+
+  // Look up the real, current delivery zones/fees — this is the ONLY source
+  // of truth for price. Whatever the browser sent for a fee is ignored.
+  const zones = await getDeliveryZones(env);
+  let zoneKey, deliveryFee, zoneLabel;
+
+  if (method === "pickup") {
+    const pickupZone = zones.find((z) => z.key === "pickup");
+    zoneKey = "pickup";
+    zoneLabel = pickupZone ? pickupZone.label : "Customer Pickup";
+    deliveryFee = 0; // pickup is always free, never trust/allow anything else
+  } else {
+    const match = zones.find((z) => z.key === deliveryZone && z.key !== "pickup");
+    if (!match) {
+      return json(
+        { error: "Please choose a valid delivery area (Nearby Warri, Standard Warri/Effurun, or Farther Areas Around Warri)." },
+        400
+      );
+    }
+    if (!address || !address.trim()) return json({ error: "Please enter your full delivery address." }, 400);
+    if (!landmark || !landmark.trim()) return json({ error: "Please enter a nearby landmark." }, 400);
+    zoneKey = match.key;
+    zoneLabel = match.label;
+    deliveryFee = match.fee;
+  }
+
+  // Verify stock availability and compute the subtotal server-side (never
   // trust a client-sent total). Stock is checked here but NOT deducted yet.
   let subtotal = 0;
   for (const item of items) {
@@ -43,19 +77,33 @@ export async function onRequestPost({ request, env }) {
     subtotal += effectivePrice * item.qty;
   }
 
-  const fee = Number.isFinite(deliveryFee) ? deliveryFee : 3000;
-  const total = subtotal + fee;
+  const total = subtotal + deliveryFee;
   const orderId = "EM-" + Math.floor(1000 + Math.random() * 9000);
   const date = new Date().toISOString();
 
   await env.DB.prepare(
-    `INSERT INTO orders (id, name, phone, address, country, originState, destState, items, total, status, date, paymentStatus, paymentRef)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, 'pending', ?)`
+    `INSERT INTO orders (id, name, phone, address, deliveryMethod, deliveryZone, deliveryZoneLabel, deliveryFee, landmark, instructions, items, total, status, date, paymentStatus, paymentRef)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, 'pending', ?)`
   )
-    .bind(orderId, name, phone, address, country || "", originState || "", destState || "", JSON.stringify(items), total, date, orderId)
+    .bind(
+      orderId,
+      name,
+      phone,
+      method === "pickup" ? "" : address.trim(),
+      method,
+      zoneKey,
+      zoneLabel,
+      deliveryFee,
+      method === "pickup" ? "" : landmark.trim(),
+      (instructions || "").trim(),
+      JSON.stringify(items),
+      total,
+      date,
+      orderId
+    )
     .run();
 
   // No stock deduction here — see the note above. The frontend proceeds to
   // call /api/payments/initialize with this order id next.
-  return json({ id: orderId, total, status: "Pending", paymentStatus: "pending", date }, 201);
+  return json({ id: orderId, total, deliveryFee, status: "Pending", paymentStatus: "pending", date }, 201);
 }

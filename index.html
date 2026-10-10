@@ -456,11 +456,10 @@
       <h3>Shop</h3>
       <a href="#" onclick="return false;">All Products</a>
       <a href="#" onclick="openTrack();return false;">Track an Order</a>
-      <a href="#" onclick="showInfo('Delivery: 1-2 days within Delta State, 3-5 days other states.', 'Delivery Info');return false;">Delivery Info</a>
+      <a href="#" onclick="showInfo('We deliver within Warri and Effurun only. Choose Customer Pickup, Nearby Warri, Standard Warri/Effurun, or Farther Areas Around Warri at checkout — most local orders go out the same day or next day.', 'Delivery Info');return false;">Delivery Info</a>
     </div>
     <div class="footer-col">
       <h3>Contact</h3>
-      <p>POS available in-store</p>
       <p>WhatsApp orders welcome</p>
     </div>
   </div>
@@ -489,11 +488,26 @@
       <div class="modal-head"><h3 style="font-size:1.1rem;">Checkout</h3><button class="close-x" onclick="closeModal('checkoutModal')">&times;</button></div>
       <div class="field"><label>Full name</label><input id="custName" placeholder="e.g. Grace Ojo"></div>
       <div class="field"><label>Phone number</label><input id="custPhone" placeholder="e.g. 0803 000 0000"></div>
-      <div class="field"><label>Country you're ordering from</label><input id="custCountry" placeholder="e.g. Nigeria" value="Nigeria"></div>
-      <div class="field"><label>State you're ordering from</label><input id="custOriginState" placeholder="e.g. Lagos"></div>
-      <div class="field"><label>State you're shipping to</label><input id="custDestState" placeholder="e.g. Delta"></div>
-      <div class="field"><label>Full delivery address</label><textarea id="custAddress" placeholder="Street, town, landmark"></textarea></div>
-      <div class="field"><label>Delivery notes (optional)</label><input id="custNotes" placeholder="e.g. call on arrival"></div>
+      <div class="field">
+        <label>Delivery method</label>
+        <select id="custDeliveryMethod" onchange="onDeliveryMethodChange()">
+          <option value="delivery">Home delivery (Warri / Effurun)</option>
+          <option value="pickup">Customer pickup — Free</option>
+        </select>
+      </div>
+      <div id="deliveryZoneField" class="field">
+        <label>Delivery area</label>
+        <select id="custDeliveryZone" onchange="renderCheckoutSummary()"></select>
+        <p style="font-size:0.74rem;color:var(--ink-soft);margin-top:5px;">Choose the zone that matches your address. We only deliver within Warri and Effurun.</p>
+      </div>
+      <div id="pickupInfoBox" class="field" style="display:none;background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius-s);padding:12px;">
+        <p style="font-size:0.85rem;line-height:1.5;">You can collect your order at our shop: <strong>Opp. Orhuwhorun Market, Udu L.G.A., Delta State</strong>. We'll call or WhatsApp you on the number above once your order is ready.</p>
+      </div>
+      <div id="addressFields">
+        <div class="field"><label>Full delivery address</label><textarea id="custAddress" placeholder="Street, house number, town"></textarea></div>
+        <div class="field"><label>Nearby landmark</label><input id="custLandmark" placeholder="e.g. opposite First Bank, Enerhen junction"></div>
+      </div>
+      <div class="field"><label>Delivery instructions (optional)</label><input id="custNotes" placeholder="e.g. call on arrival"></div>
       <div class="field"><label>Email or phone for sale alerts (optional)</label><input id="custSubscribe" placeholder="Get notified about future Discount Days"></div>
       <div id="checkoutSummary" style="margin-top:14px;"></div>
       <button class="btn-primary" style="margin-top:10px;" onclick="placeOrder()">Pay with Flutterwave</button>
@@ -570,7 +584,16 @@
 /* ================= CONFIG ================= */
 const CATEGORIES = ["All","Cookware","Gas & Accessories","Appliances","Kitchenware","Pressing Irons"];
 const LOW_STOCK_THRESHOLD = 3;
-const DELIVERY_FEE = 3000;
+// Delivery zones (Warri/Effurun only — no interstate delivery) and their
+// fees come from the backend (/api/delivery-zones), not hardcoded here, so
+// the business owner can change prices from the admin panel. This is just
+// a fallback shown for an instant before that first loads.
+let deliveryZones = [
+  { key: "pickup", label: "Customer Pickup", fee: 0, editable: false },
+  { key: "nearby", label: "Nearby Warri", fee: 1500, editable: true },
+  { key: "standard", label: "Standard Warri/Effurun", fee: 2000, editable: true },
+  { key: "far", label: "Farther Areas Around Warri", fee: 3000, editable: true }
+];
 const STATUS_STEPS = [
   {key:"Pending", icon:"📝", label:"Order Placed"},
   {key:"Processing", icon:"🧰", label:"Processing"},
@@ -663,6 +686,7 @@ async function refreshOrders() { const d = await apiFetch('/api/orders'); if (d)
 async function refreshPromotions() { const d = await apiFetch('/api/promotions'); if (d) promotions = d; }
 async function refreshTestimonials() { const d = await apiFetch('/api/testimonials'); if (d) testimonials = d; }
 async function refreshFaqs() { const d = await apiFetch('/api/faqs'); if (d) faqs = d; }
+async function refreshDeliveryZones() { const d = await apiFetch('/api/delivery-zones'); if (d && d.length) deliveryZones = d; }
 
 async function refreshSubscribers() { const d = await apiFetch('/api/subscribers'); if (d) subscribers = d; }
 
@@ -841,9 +865,34 @@ function openCart() { renderCart(); document.getElementById('cartOverlay').class
 function closeCart() { document.getElementById('cartOverlay').classList.remove('open'); document.getElementById('cartDrawer').classList.remove('open'); }
 
 /* ================= CHECKOUT ================= */
+// Pickup vs delivery: toggles which fields are shown and required. The
+// amount actually charged is always recalculated by the server at order
+// time — this client-side total is only shown to the customer, never trusted.
+function getSelectedZone() {
+  const method = document.getElementById('custDeliveryMethod').value;
+  if (method === 'pickup') return deliveryZones.find(z => z.key === 'pickup') || { key: 'pickup', label: 'Customer Pickup', fee: 0 };
+  const zoneSelect = document.getElementById('custDeliveryZone');
+  const key = zoneSelect ? zoneSelect.value : '';
+  return deliveryZones.find(z => z.key === key) || null;
+}
+function populateDeliveryZoneSelect() {
+  const sel = document.getElementById('custDeliveryZone');
+  if (!sel) return;
+  const options = deliveryZones.filter(z => z.key !== 'pickup');
+  sel.innerHTML = options.map(z => `<option value="${z.key}">${z.label} — ${naira(z.fee)}</option>`).join('');
+}
+function onDeliveryMethodChange() {
+  const method = document.getElementById('custDeliveryMethod').value;
+  const isPickup = method === 'pickup';
+  document.getElementById('deliveryZoneField').style.display = isPickup ? 'none' : 'block';
+  document.getElementById('addressFields').style.display = isPickup ? 'none' : 'block';
+  document.getElementById('pickupInfoBox').style.display = isPickup ? 'block' : 'none';
+  renderCheckoutSummary();
+}
 function updateDeliveryFee() { renderCheckoutSummary(); }
 function renderCheckoutSummary() {
-  const fee = DELIVERY_FEE;
+  const zone = getSelectedZone();
+  const fee = zone ? zone.fee : 0;
   const livePromo = getLivePromoToday();
   const rawSubtotal = Object.entries(cart).reduce((sum,[id,qty])=>{
     const p = products.find(x=>x.id===id);
@@ -855,32 +904,45 @@ function renderCheckoutSummary() {
   document.getElementById('checkoutSummary').innerHTML = `
     <div class="summary-line"><span>Subtotal</span><span>${naira(rawSubtotal)}</span></div>
     ${discount>0 ? `<div class="summary-line"><span>${livePromo.title} (${livePromo.discount}% off, today only)</span><span>-${naira(discount)}</span></div>` : ''}
-    <div class="summary-line"><span>Delivery fee</span><span>${naira(fee)}</span></div>
+    <div class="summary-line"><span>${zone ? zone.label : 'Delivery'}</span><span>${naira(fee)}</span></div>
     <div class="summary-line total"><span>Total</span><span>${naira(total)}</span></div>
   `;
 }
-function openCheckout() {
+async function openCheckout() {
   if (Object.keys(cart).length===0) return;
   closeCart();
   document.getElementById('checkoutStep1').style.display='block';
   document.getElementById('checkoutStep2').style.display='none';
+  await refreshDeliveryZones();
+  populateDeliveryZoneSelect();
+  document.getElementById('custDeliveryMethod').value = 'delivery';
+  onDeliveryMethodChange();
   renderCheckoutSummary();
   document.getElementById('checkoutModal').classList.add('open');
 }
 async function placeOrder() {
   const name = document.getElementById('custName').value.trim();
   const phone = document.getElementById('custPhone').value.trim();
-  const country = document.getElementById('custCountry').value.trim();
-  const originState = document.getElementById('custOriginState').value.trim();
-  const destState = document.getElementById('custDestState').value.trim();
+  const deliveryMethod = document.getElementById('custDeliveryMethod').value;
+  const zone = getSelectedZone();
   const address = document.getElementById('custAddress').value.trim();
+  const landmark = document.getElementById('custLandmark').value.trim();
+  const instructions = document.getElementById('custNotes').value.trim();
   const subscribeContact = document.getElementById('custSubscribe').value.trim();
-  if (!name || !phone || !address || !originState || !destState) { showToast("Please fill in your name, phone, address, and both states."); return; }
+
+  if (!name || !phone) { showToast("Please fill in your name and phone number."); return; }
+  if (deliveryMethod === 'delivery') {
+    if (!zone || zone.key === 'pickup') { showToast("Please choose a delivery area."); return; }
+    if (!address) { showToast("Please enter your full delivery address."); return; }
+    if (!landmark) { showToast("Please enter a nearby landmark."); return; }
+  }
 
   const payload = {
-    name, phone, address, country, originState, destState,
-    items: Object.entries(cart).map(([id,qty])=>({id,qty})),
-    deliveryFee: DELIVERY_FEE
+    name, phone,
+    deliveryMethod,
+    deliveryZone: deliveryMethod === 'pickup' ? 'pickup' : zone.key,
+    address, landmark, instructions,
+    items: Object.entries(cart).map(([id,qty])=>({id,qty}))
   };
   const placeBtn = document.querySelector('#checkoutStep1 .btn-primary');
   if (placeBtn) { placeBtn.disabled = true; placeBtn.textContent = 'Processing...'; }
@@ -1029,7 +1091,9 @@ async function doTrack() {
         </div>
       </div>
       <div style="font-size:0.8rem;color:var(--ink-soft);margin-top:6px;text-align:center;">
-        ${order.originState ? `From ${order.originState}${order.country ? ', '+order.country : ''} → ` : ''}Delivering to ${order.destState ? order.destState+' — ' : ''}${order.address}
+        ${order.deliveryMethod === 'pickup'
+          ? 'Customer pickup — Opp. Orhuwhorun Market, Udu L.G.A.'
+          : `${order.deliveryZoneLabel || 'Delivery'}${order.address ? ' — ' + order.address : ''}${order.landmark ? ' (near ' + order.landmark + ')' : ''}`}
       </div>
       <button class="small-btn" style="width:100%;margin-top:12px;" onclick="reorder('${order.id}')">Reorder These Items</button>
     </div>
@@ -1156,6 +1220,7 @@ async function renderAdmin() {
         <button class="admin-tab active" id="tabProducts" onclick="switchAdminTab('products')">Products</button>
         <button class="admin-tab" id="tabOrders" onclick="switchAdminTab('orders')">Orders</button>
         <button class="admin-tab" id="tabAdd" onclick="switchAdminTab('add')">Add Product</button>
+        <button class="admin-tab" id="tabDelivery" onclick="switchAdminTab('delivery')">Delivery Fees</button>
         <button class="admin-tab" id="tabPromos" onclick="switchAdminTab('promos')">Discount Events</button>
         <button class="admin-tab" id="tabReviews" onclick="switchAdminTab('reviews')">Reviews</button>
         <button class="admin-tab" id="tabFaq" onclick="switchAdminTab('faq')">FAQ</button>
@@ -1177,6 +1242,12 @@ async function renderAdmin() {
         <div class="field"><label>Description</label><textarea id="newDesc" placeholder="Short description"></textarea></div>
         <button class="small-btn" onclick="addNewProduct()">Add Product</button>
         <p style="font-size:0.78rem;color:var(--ink-soft);margin-top:10px;">Photos are stored in the database and served to every visitor.</p>
+      </div>
+      <div class="admin-section" id="secDelivery">
+        <p style="font-size:0.82rem;color:var(--ink-soft);margin-bottom:14px;">We only deliver within Warri and Effurun. Customer Pickup always stays free. Adjust the three delivery fees below if an independent rider is charging more than usual — changes apply to every order placed after you save.</p>
+        <div id="deliveryFeeFields"></div>
+        <button class="small-btn" onclick="saveDeliveryFees()">Save Delivery Fees</button>
+        <p style="font-size:0.78rem;color:var(--ink-soft);margin-top:10px;">Orders already placed keep the fee that was charged at the time — changing a fee here only affects new orders from now on.</p>
       </div>
       <div class="admin-section" id="secPromos">
         <div class="field"><label>Promotion name</label><input id="promoTitle" placeholder="e.g. End of Year Sale"></div>
@@ -1211,7 +1282,8 @@ async function renderAdmin() {
     refreshPromotions(),
     refreshTestimonials(),
     refreshFaqs(),
-    refreshSubscribers()
+    refreshSubscribers(),
+    refreshDeliveryZones()
   ]);
 
   renderAdminProducts();
@@ -1220,9 +1292,10 @@ async function renderAdmin() {
   renderAdminReviews();
   renderAdminReports();
   renderAdminFaqs();
+  renderAdminDelivery();
 }
 function switchAdminTab(tab) {
-  const map = {products:'Products', orders:'Orders', add:'Add', promos:'Promos', reviews:'Reviews', faq:'Faq', reports:'Reports'};
+  const map = {products:'Products', orders:'Orders', add:'Add', delivery:'Delivery', promos:'Promos', reviews:'Reviews', faq:'Faq', reports:'Reports'};
   Object.keys(map).forEach(t=>{
     document.getElementById('tab'+map[t]).classList.toggle('active', t===tab);
     document.getElementById('sec'+map[t]).classList.toggle('active', t===tab);
@@ -1372,7 +1445,7 @@ function renderAdminOrders() {
     ${orders.slice().reverse().map(o=>`<tr>
       <td>${o.id}</td>
       <td>${o.name}<br><span style="color:var(--ink-soft);font-size:0.78rem;">${o.phone}</span></td>
-      <td style="font-size:0.78rem;">${o.originState||'—'} → ${o.destState||'—'}</td>
+      <td style="font-size:0.78rem;">${o.deliveryMethod==='pickup' ? 'Pickup' : `${o.deliveryZoneLabel||o.deliveryZone||'—'}<br><span style="color:var(--ink-soft);">${o.address||''}${o.landmark?' · near '+o.landmark:''}</span>`}</td>
       <td>${naira(o.total)}</td>
       <td>${paymentBadge(o.paymentStatus)}</td>
       <td>
@@ -1413,6 +1486,30 @@ function clearAllOrders() {
       showToast("All orders cleared — reports reset.");
     }
   });
+}
+
+/* ================= DELIVERY FEES (ADMIN) ================= */
+function renderAdminDelivery() {
+  const wrap = document.getElementById('deliveryFeeFields');
+  if (!wrap) return;
+  wrap.innerHTML = deliveryZones.map(z => {
+    if (!z.editable) {
+      return `<div class="field"><label>${z.label}</label><input value="${naira(z.fee)} (fixed)" disabled></div>`;
+    }
+    return `<div class="field"><label>${z.label}</label><input class="deliveryFeeInput" data-key="${z.key}" type="number" min="0" value="${z.fee}"></div>`;
+  }).join('');
+}
+async function saveDeliveryFees() {
+  const fees = {};
+  document.querySelectorAll('.deliveryFeeInput').forEach(input => {
+    fees[input.dataset.key] = Number(input.value);
+  });
+  const result = await apiFetch('/api/delivery-zones', { method: 'PUT', body: JSON.stringify({ fees }) });
+  if (result) {
+    deliveryZones = result;
+    renderAdminDelivery();
+    showToast("Delivery fees updated.");
+  }
 }
 
 /* ================= DISCOUNT EVENTS (ADMIN) ================= */
@@ -1688,16 +1785,18 @@ window.addEventListener('popstate', () => {
 
 /* ================= INIT ================= */
 async function init() {
-  const [productsData, promosData, testiData, faqsData] = await Promise.all([
+  const [productsData, promosData, testiData, faqsData, zonesData] = await Promise.all([
     apiFetch('/api/products'),
     apiFetch('/api/promotions'),
     apiFetch('/api/testimonials'),
-    apiFetch('/api/faqs')
+    apiFetch('/api/faqs'),
+    apiFetch('/api/delivery-zones')
   ]);
   products = productsData || [];
   promotions = promosData || [];
   testimonials = testiData || [];
   faqs = faqsData || [];
+  if (zonesData && zonesData.length) deliveryZones = zonesData;
 
   renderCats();
   renderProducts();
