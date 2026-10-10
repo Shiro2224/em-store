@@ -1,5 +1,5 @@
 import { json, corsPreflight, isAdmin } from "../../_helpers/utils.js";
-import { getDeliveryZones } from "../delivery-zones/index.js";
+import { getDeliveryZones } from "../../_helpers/deliveryZones.js";
 
 export async function onRequestOptions() {
   return corsPreflight();
